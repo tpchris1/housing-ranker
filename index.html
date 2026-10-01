@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Housing Ranker</title>
+<meta name="description" content="Score rental apartments against weighted personal criteria.">
+<link rel="stylesheet" href="styles.css">
+<!-- LZ-String for share-link compression; app falls back to plain encoding if this fails to load -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+
+<div id="share-banner" hidden>
+  <div class="wrap">
+    <span id="share-banner-text">This link contains a shared snapshot of someone's Housing Ranker shortlist.</span>
+    <button class="btn small" id="share-load">Load snapshot</button>
+    <button class="btn small" id="share-dismiss">Dismiss</button>
+  </div>
+</div>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">Housing Ranker</div>
+    <div class="top-actions">
+      <button class="btn primary" id="btn-add-apt"></button>
+      <button class="btn" id="btn-share"></button>
+      <button class="btn" id="btn-export"></button>
+      <button class="btn" id="btn-import"></button>
+    </div>
+  </div>
+</header>
+
+<div class="preset-bar">
+  <div class="preset-inner">
+    <span class="lbl">Weight preset</span>
+    <select id="preset-select" aria-label="Active weight preset"></select>
+    <button class="btn small" id="btn-manage-presets">Manage presets</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="rankings" role="tab">Rankings</button>
+    <button class="tab-btn" data-tab="apartments" role="tab">Apartments</button>
+    <button class="tab-btn" data-tab="compare" role="tab">Compare</button>
+    <button class="tab-btn" data-tab="settings" role="tab">Settings</button>
+  </nav>
+
+  <main>
+    <section class="tab-panel" id="tab-rankings" role="tabpanel">
+      <div class="panel-head">
+        <h2>Ranked shortlist</h2>
+        <div class="sort-toggle" role="group" aria-label="Sort order">
+          <button id="sort-score" class="active">By score</button>
+          <button id="sort-cost">By cost</button>
+        </div>
+      </div>
+      <div id="rankings-body"></div>
+    </section>
+
+    <section class="tab-panel" id="tab-apartments" role="tabpanel" hidden>
+      <div class="panel-head">
+        <h2>Apartments</h2>
+        <button class="btn primary small" id="btn-add-apt-2">Add apartment</button>
+      </div>
+      <div id="apartments-body"></div>
+    </section>
+
+    <section class="tab-panel" id="tab-compare" role="tabpanel" hidden>
+      <div class="panel-head">
+        <h2>Side-by-side comparison</h2>
+      </div>
+      <p class="hint" style="margin-top:0">Tick "Compare" on ranking cards to choose candidates. With nothing ticked, the top 4 by score are shown.</p>
+      <div class="table-scroll"><table class="cmp" id="compare-table"></table></div>
+    </section>
+
+    <section class="tab-panel" id="tab-settings" role="tabpanel" hidden>
+      <div class="panel-head"><h2>Settings</h2></div>
+      <div id="settings-body"></div>
+    </section>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<input type="file" id="import-file" accept="application/json,.json" hidden>
+
+</body>
+</html>
