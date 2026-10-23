@@ -88,6 +88,7 @@ header.top {
 .btn.small { padding: 5px 10px; font-size: 0.8rem; }
 .btn svg { width: 15px; height: 15px; flex: none; }
 .btn:disabled { opacity: 0.55; cursor: default; }
+a.btn { text-decoration: none; }
 
 .icon-btn {
   appearance: none;
@@ -299,6 +300,27 @@ table.cmp td.num, table.cmp th.num { font-variant-numeric: tabular-nums; }
 .radio-card input { accent-color: var(--accent); }
 .radio-card .rn { font-weight: 700; }
 .radio-card .rw { font-size: 0.78rem; color: var(--muted); margin-left: auto; text-align: right; }
+
+/* ---------- seeding ---------- */
+.seed-panel { margin-top: 14px; }
+.seed-msgs {
+  max-height: 320px; overflow-y: auto; display: grid; gap: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-2); padding: 12px; margin-bottom: 10px;
+}
+.seed-msg {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 10px; padding: 8px 11px; font-size: 0.88rem;
+  white-space: pre-wrap; word-break: break-word; max-width: 94%;
+}
+.seed-msg.assistant { justify-self: start; }
+.seed-msg.user {
+  justify-self: end; background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+}
+.seed-msgs .btn { justify-self: start; }
+.chat-row { display: flex; gap: 8px; }
+.chat-row input { flex: 1; }
+.copy-box { min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
 
 @media (max-width: 640px) {
   .plan-row { grid-template-columns: 1fr 1fr; }

@@ -23,6 +23,9 @@ const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search?format=jsonv2&
 // Assumed average driving speed for commute estimates (no paid API key needed).
 const ASSUMED_KMH = 40;
 
+// Shown wherever an address is entered (onboarding + settings).
+const PRIVACY_NOTE = 'Privacy: your address is never sent to or stored on a server. It stays in this browser, on this device. Only the coordinates are kept, so the app can score commutes — the address text itself is not saved. Geocoding sends what you type to OpenStreetMap once to find the coordinates. If you create a share link, the coordinates travel with it — only when you choose to share.';
+
 const CATEGORIES = [
   { key: 'rent',         label: 'Rent' },
   { key: 'commute',      label: 'Commute' },
@@ -93,10 +96,14 @@ let apartments = {};    // hr_apartments blob
 let sortMode = 'score'; // 'score' | 'cost'
 let activeTab = 'rankings';
 const compareSel = new Set(); // candidate keys ticked for comparison (session only)
+let seedChat = []; // free-AI seed conversation (session only, never persisted)
 
 function freshSettings() {
   return {
-    work_addresses: [],
+    work_addresses: [
+      { name: 'Office', lat: null, lng: null },
+      { name: 'Home', lat: null, lng: null },
+    ],
     primary_work_address: 0,
     num_cars: 1,
     weight_presets: STARTER_PRESETS.map(p => ({ id: p.id, name: p.name, weights: { ...p.weights } })),
@@ -116,6 +123,24 @@ function loadState() {
     settings.weight_presets = freshSettings().weight_presets;
     settings.active_preset_id = 'balanced';
   }
+  normalizeSettings();
+}
+
+// Locations hygiene: raw address text is never kept (only label + coords),
+// the Office and Home slots always exist, and the primary index stays in range.
+function normalizeSettings() {
+  if (!settings) return;
+  if (!Array.isArray(settings.work_addresses)) settings.work_addresses = [];
+  settings.work_addresses.forEach(w => { if (w && typeof w === 'object') delete w.addr; });
+  if (!settings.work_addresses.some(w => w && w.name === 'Office')) {
+    settings.work_addresses.push({ name: 'Office', lat: null, lng: null });
+  }
+  if (!settings.work_addresses.some(w => w && w.name === 'Home')) {
+    settings.work_addresses.push({ name: 'Home', lat: null, lng: null });
+  }
+  const last = settings.work_addresses.length - 1;
+  const p = parseInt(settings.primary_work_address, 10);
+  settings.primary_work_address = Number.isFinite(p) ? Math.min(Math.max(p, 0), last) : 0;
 }
 
 function save() {
@@ -126,7 +151,15 @@ function save() {
 const activePreset = () =>
   settings.weight_presets.find(p => p.id === settings.active_preset_id) || settings.weight_presets[0];
 
-const primaryWork = () => settings.work_addresses[settings.primary_work_address] || null;
+const hasCoords = w => !!w && Number.isFinite(parseFloat(w.lat)) && Number.isFinite(parseFloat(w.lng));
+
+// The primary location if it has coordinates, else the first location that
+// does (e.g. Office unset but Home set), else null.
+const primaryWork = () => {
+  const w = settings.work_addresses[settings.primary_work_address];
+  if (hasCoords(w)) return w;
+  return settings.work_addresses.find(hasCoords) || null;
+};
 
 /* ============================== scoring engine ============================== */
 
@@ -297,8 +330,10 @@ function renderRankings() {
 
   if (!cands.length) {
     body.innerHTML = '<div class="empty"><p>No apartments yet. Add your first candidate to start ranking.</p>' +
-      '<button class="btn primary" id="empty-add">Add apartment</button></div>';
+      '<button class="btn primary" id="empty-add">Add apartment</button> ' +
+      '<button class="btn" id="empty-seed">Seed apartments</button></div>';
     $('#empty-add').onclick = () => openApartmentForm();
+    $('#empty-seed').onclick = () => openSeedModal();
     return;
   }
 
@@ -422,8 +457,8 @@ function renderSettings() {
   const body = $('#settings-body');
   const wAddrs = settings.work_addresses.map((w, i) =>
     '<div class="addr-row"><input type="radio" name="primary-work" value="' + i + '"' +
-    (i === settings.primary_work_address ? ' checked' : '') + ' title="Set as primary" aria-label="Set ' + esc(w.name) + ' as primary work address">' +
-    '<b>' + esc(w.name) + '</b><span class="hint">' + esc(String(w.lat)) + ', ' + esc(String(w.lng)) + '</span>' +
+    (i === settings.primary_work_address ? ' checked' : '') + ' title="Set as primary location" aria-label="Set ' + esc(w.name) + ' as primary location">' +
+    '<b>' + esc(w.name) + '</b><span class="hint">' + (w.lat == null || w.lng == null ? 'not set yet' : esc(String(w.lat)) + ', ' + esc(String(w.lng))) + '</span>' +
     '<span class="ops" style="margin-left:auto;display:flex;gap:6px">' +
     '<button class="btn small danger" data-del-addr="' + i + '">Remove</button></span></div>').join('');
 
@@ -440,8 +475,9 @@ function renderSettings() {
   }).join('');
 
   body.innerHTML =
-    '<div class="set-section"><h3>Work addresses</h3>' + (wAddrs || '<p class="hint">None yet.</p>') +
-    '<div class="row-flex" style="margin-top:10px"><button class="btn small" id="set-add-addr">Add work address</button></div></div>' +
+    '<div class="set-section"><h3>Your locations</h3>' + (wAddrs || '<p class="hint">None yet.</p>') +
+    '<div class="row-flex" style="margin-top:10px"><button class="btn small" id="set-add-addr">Add work address</button></div>' +
+    '<p class="hint">' + PRIVACY_NOTE + '</p></div>' +
     '<div class="set-section"><h3>Household</h3><div class="row-flex"><label class="fld" style="margin:0"><span>Number of cars</span>' +
     '<input type="number" id="set-cars" min="0" step="1" value="' + esc(String(settings.num_cars)) + '" style="width:90px"></label></div>' +
     '<p class="hint">Drives the parking math: cars beyond the included spots add the apartment\'s extra-parking cost.</p></div>' +
@@ -461,8 +497,8 @@ function renderSettings() {
   $$('#settings-body [data-del-addr]').forEach(b => {
     b.onclick = () => {
       const i = parseInt(b.dataset.delAddr, 10);
-      if (settings.work_addresses.length <= 1) { toast('Keep at least one work address'); return; }
-      if (!confirm('Remove this work address?')) return;
+      if (settings.work_addresses.length <= 1) { toast('Keep at least one location'); return; }
+      if (!confirm('Remove this location?')) return;
       settings.work_addresses.splice(i, 1);
       if (settings.primary_work_address >= settings.work_addresses.length) settings.primary_work_address = 0;
       else if (settings.primary_work_address === i) settings.primary_work_address = 0;
@@ -549,28 +585,37 @@ function modalFooter(buttons) {
 const showErr = (box, msg) => { box.textContent = msg || ''; };
 
 /* ---------- work-address sub-form (used by onboarding + settings) ---------- */
-// Builds one address row: name, address text, geocode button, lat/lng, status, remove.
+// Builds one location row: name, address text (auto-geocoded, never saved),
+// lat/lng, status, remove.
 function workAddressRow(w, canRemove, onRemove) {
-  w = w || { name: '', lat: '', lng: '' };
+  w = w || { name: '', lat: null, lng: null };
+  const latVal = w.lat == null ? '' : String(w.lat);
+  const lngVal = w.lng == null ? '' : String(w.lng);
   const div = document.createElement('div');
   div.className = 'ob-addr';
   div.innerHTML =
     '<div class="fld-row">' +
     '<label class="fld"><span>Name</span><input type="text" data-wa="name" value="' + esc(w.name) + '" placeholder="e.g. Office"></label>' +
-    '<label class="fld"><span>Address (for geocoding)</span><input type="text" data-wa="addr" value="' + esc(w.addr || '') + '" placeholder="1 Infinite Loop, Cupertino CA"></label>' +
+    '<label class="fld"><span>Address (for geocoding)</span><input type="text" data-wa="addr" value="" placeholder="1 Infinite Loop, Cupertino CA"></label>' +
     '</div>' +
     '<div class="geo-row">' +
-    '<label class="fld"><span>Latitude</span><input type="number" step="any" data-wa="lat" value="' + esc(String(w.lat)) + '" placeholder="37.33"></label>' +
-    '<label class="fld"><span>Longitude</span><input type="number" step="any" data-wa="lng" value="' + esc(String(w.lng)) + '" placeholder="-122.01"></label>' +
-    '<button type="button" class="btn small" data-wa="geo">' + icon('pin') + ' Geocode</button>' +
+    '<label class="fld"><span>Latitude</span><input type="number" step="any" data-wa="lat" value="' + esc(latVal) + '" placeholder="37.33"></label>' +
+    '<label class="fld"><span>Longitude</span><input type="number" step="any" data-wa="lng" value="' + esc(lngVal) + '" placeholder="-122.01"></label>' +
     (canRemove ? '<button type="button" class="btn small danger" data-wa="rm">Remove</button>' : '') +
     '</div><div class="geo-status" data-wa="status"></div>';
   const status = $('[data-wa="status"]', div);
-  $('[data-wa="geo"]', div).onclick = async ev => {
-    const btn = ev.currentTarget;
-    const q = $('[data-wa="addr"]', div).value.trim();
-    if (!q) { status.textContent = 'Type an address first.'; return; }
-    btn.disabled = true;
+  const addrInput = $('[data-wa="addr"]', div);
+  if (latVal !== '' && lngVal !== '') {
+    status.textContent = 'Coordinates saved: ' + latVal + ', ' + lngVal + ' — type an address to change them.';
+  }
+  // Auto-geocode: debounce 900ms while typing, plus on blur if the current
+  // text has not been looked up yet. The address text is used for the lookup
+  // only; it is never stored (see readWorkAddressRow / normalizeSettings).
+  let geoTimer = null;
+  const runGeocode = async () => {
+    const q = addrInput.value.trim();
+    if (!q || div.dataset.geoQuery === q) return;
+    div.dataset.geoQuery = q;
     status.className = 'geo-status';
     status.textContent = 'Looking up…';
     try {
@@ -585,20 +630,31 @@ function workAddressRow(w, canRemove, onRemove) {
     } catch (err) {
       status.textContent = 'Geocoding failed (' + err.message + '). Enter coordinates manually.';
     }
-    btn.disabled = false;
   };
+  addrInput.addEventListener('input', () => {
+    clearTimeout(geoTimer);
+    geoTimer = setTimeout(runGeocode, 900);
+  });
+  addrInput.addEventListener('blur', () => {
+    clearTimeout(geoTimer);
+    runGeocode();
+  });
   if (canRemove) $('[data-wa="rm"]', div).onclick = () => { div.remove(); onRemove && onRemove(); };
   return div;
 }
 
 function readWorkAddressRow(div) {
-  const lat = parseFloat($('[data-wa="lat"]', div).value);
-  const lng = parseFloat($('[data-wa="lng"]', div).value);
   const name = $('[data-wa="name"]', div).value.trim();
-  const addr = $('[data-wa="addr"]', div).value.trim();
   if (!name) return { error: 'Each work address needs a name.' };
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { error: 'Address "' + name + '" needs valid coordinates (use Geocode or type them).' };
-  return { value: { name, lat, lng, addr } };
+  const latRaw = $('[data-wa="lat"]', div).value.trim();
+  const lngRaw = $('[data-wa="lng"]', div).value.trim();
+  if (latRaw === '' && lngRaw === '') return { value: { name, lat: null, lng: null } };
+  const lat = parseFloat(latRaw);
+  const lng = parseFloat(lngRaw);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { error: 'Address "' + name + '" needs both latitude and longitude (type the address and let it look them up, or enter both).' };
+  }
+  return { value: { name, lat, lng } };
 }
 
 /* ---------- onboarding ---------- */
@@ -606,8 +662,9 @@ function readWorkAddressRow(div) {
 function openOnboarding() {
   const body = document.createElement('div');
   body.innerHTML =
-    '<div class="ob-step"><h3>1. Where do you work?</h3><p class="hint">Used for commute estimates. The first address is the primary one.</p>' +
-    '<div id="ob-addrs"></div><button type="button" class="btn small" id="ob-add-addr">Add another work address</button></div>' +
+    '<div class="ob-step"><h3>1. Your locations</h3><p class="hint">Commute estimates are measured to your primary location. Fill in either or both — you can change them later.</p>' +
+    '<div id="ob-addrs"></div><button type="button" class="btn small" id="ob-add-addr">Add another location</button>' +
+    '<p class="hint">' + PRIVACY_NOTE + '</p></div>' +
     '<div class="ob-step"><h3>2. How many cars?</h3>' +
     '<label class="fld" style="max-width:160px"><span>Number of cars</span><input type="number" id="ob-cars" min="0" step="1" value="1"></label></div>' +
     '<div class="ob-step"><h3>3. What matters most?</h3><p class="hint">Pick a starting weight preset — you can tweak or add presets later.</p>' +
@@ -616,8 +673,9 @@ function openOnboarding() {
 
   const addrsBox = $('#ob-addrs', body);
   const addRow = w => addrsBox.appendChild(workAddressRow(w, addrsBox.children.length > 0));
-  addRow({ name: 'Office' });
-  $('#ob-add-addr', body).onclick = () => addRow({ name: 'Work ' + (addrsBox.children.length + 1) });
+  addRow({ name: 'Office', lat: null, lng: null });
+  addRow({ name: 'Home', lat: null, lng: null });
+  $('#ob-add-addr', body).onclick = () => addRow({ name: '' });
 
   $('#ob-presets', body).innerHTML = STARTER_PRESETS.map((p, i) => {
     const ws = CATEGORIES.map(c => c.label + ' ' + p.weights[c.key]).join(' · ');
@@ -628,17 +686,19 @@ function openOnboarding() {
   body.appendChild(modalFooter([['Start ranking', 'primary', () => {
     const errBox = $('#ob-err', body);
     const rows = $$('#ob-addrs .ob-addr', body);
-    if (!rows.length) { showErr(errBox, 'Add at least one work address.'); return; }
+    if (!rows.length) { showErr(errBox, 'Add at least one location.'); return; }
     const addrs = [];
     for (const r of rows) {
       const res = readWorkAddressRow(r);
       if (res.error) { showErr(errBox, res.error); return; }
       addrs.push(res.value);
     }
+    const firstGeo = addrs.findIndex(a => a.lat != null && a.lng != null);
+    if (firstGeo < 0) { showErr(errBox, 'Give at least one location an address so we can look up its coordinates.'); return; }
     const cars = Math.max(0, parseInt($('#ob-cars', body).value, 10) || 0);
     const picked = ($('input[name="ob-preset"]:checked', body) || {}).value || 'balanced';
-    settings.work_addresses = addrs.map(a => ({ name: a.name, lat: a.lat, lng: a.lng }));
-    settings.primary_work_address = 0;
+    settings.work_addresses = addrs;
+    settings.primary_work_address = firstGeo;
     settings.num_cars = cars;
     settings.active_preset_id = picked;
     settings.onboarded = true;
@@ -663,9 +723,9 @@ function openWorkAddressForm() {
     if (res.error) { showErr(err, res.error); return; }
     settings.work_addresses.push({ name: res.value.name, lat: res.value.lat, lng: res.value.lng });
     save(); closeModal(); renderAll();
-    toast('Work address added');
+    toast('Location added');
   }]]));
-  openModal('Add work address', body);
+  openModal('Add location', body);
 }
 
 /* ---------- apartment form ---------- */
@@ -706,7 +766,6 @@ function openApartmentForm(editName) {
     '<div class="geo-row">' +
     '<label class="fld"><span>Latitude</span><input type="number" step="any" id="f-lat" value="' + esc(v('latitude')) + '"></label>' +
     '<label class="fld"><span>Longitude</span><input type="number" step="any" id="f-lng" value="' + esc(v('longitude')) + '"></label>' +
-    '<button type="button" class="btn small" id="f-geocode">' + icon('pin') + ' Geocode address</button>' +
     '</div><div class="geo-status" id="f-geo-status"></div>' +
     '<div class="fld-row">' +
     '<label class="fld"><span>Year built</span><input type="number" id="f-year" min="1800" max="2100" step="1" value="' + esc(v('year_built')) + '"></label>' +
@@ -764,24 +823,37 @@ function openApartmentForm(editName) {
   existing.forEach(addPlan);
   $('#f-add-plan', body).onclick = () => addPlan({});
 
-  // Geocode the apartment address into lat/lng.
-  $('#f-geocode', body).onclick = async ev => {
-    const btn = ev.currentTarget, status = $('#f-geo-status', body);
-    const q = $('#f-address', body).value.trim();
-    if (!q) { status.textContent = 'Type an address first.'; return; }
-    btn.disabled = true; status.className = 'geo-status'; status.textContent = 'Looking up…';
+  // The apartment address auto-geocodes into lat/lng: debounce 900ms while
+  // typing, plus on blur if the current text has not been looked up yet.
+  const fAddr = $('#f-address', body);
+  const fStatus = $('#f-geo-status', body);
+  let fGeoTimer = null;
+  let fGeoQuery = '';
+  const runAptGeocode = async () => {
+    const q = fAddr.value.trim();
+    if (!q || fGeoQuery === q) return;
+    fGeoQuery = q;
+    fStatus.className = 'geo-status';
+    fStatus.textContent = 'Looking up…';
     try {
       const g = await geocode(q);
-      if (!g) status.textContent = 'No results found — check the address or enter coordinates manually.';
+      if (!g) fStatus.textContent = 'No results found — check the address or enter coordinates manually.';
       else {
         $('#f-lat', body).value = g.lat.toFixed(6);
         $('#f-lng', body).value = g.lng.toFixed(6);
-        status.className = 'geo-status ok';
-        status.textContent = 'Found: ' + g.display.slice(0, 90);
+        fStatus.className = 'geo-status ok';
+        fStatus.textContent = 'Found: ' + g.display.slice(0, 90);
       }
-    } catch (err) { status.textContent = 'Geocoding failed (' + err.message + '). Enter coordinates manually.'; }
-    btn.disabled = false;
+    } catch (err) { fStatus.textContent = 'Geocoding failed (' + err.message + '). Enter coordinates manually.'; }
   };
+  fAddr.addEventListener('input', () => {
+    clearTimeout(fGeoTimer);
+    fGeoTimer = setTimeout(runAptGeocode, 900);
+  });
+  fAddr.addEventListener('blur', () => {
+    clearTimeout(fGeoTimer);
+    runAptGeocode();
+  });
 
   // Commute estimate from distance; manual edits clear the flag.
   const estTag = $('#f-est-tag', body);
@@ -789,7 +861,7 @@ function openApartmentForm(editName) {
     const lat = parseFloat($('#f-lat', body).value), lng = parseFloat($('#f-lng', body).value);
     const work = primaryWork();
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) { toast('Need apartment coordinates first'); return; }
-    if (!work) { toast('Set a work address in Settings first'); return; }
+    if (!work) { toast('Set a location in Settings first'); return; }
     const mins = estimateCommuteMinutes(lat, lng, work);
     $('#f-commute', body).value = mins;
     estTag.hidden = false;
@@ -909,6 +981,307 @@ function openPresetEditor(presetId) {
   openModal(isNew ? 'New weight preset' : 'Edit weight preset', body);
 }
 
+/* ============================== seeding apartments ============================== */
+
+// Pull an apartment array out of arbitrary text: a ```json fenced block, a
+// bare [ ... ] array, or a lone { ... } object (wrapped into an array).
+// Returns the raw item array, or null when nothing parses.
+function extractSeedJSON(text) {
+  if (!text || typeof text !== 'string') return null;
+  let s = text;
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    s = fence[1];
+  } else {
+    const a = s.indexOf('['), b = s.lastIndexOf(']');
+    if (a >= 0 && b > a) {
+      s = s.slice(a, b + 1);
+    } else {
+      const c = s.indexOf('{'), d = s.lastIndexOf('}');
+      if (c >= 0 && d > c) s = s.slice(c, d + 1);
+      else return null;
+    }
+  }
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object') return [parsed];
+    return null;
+  } catch (e) { return null; }
+}
+
+// Import seed results (from either the free AI chat or the Muse loop).
+// Records get the same field set as the apartment form, blank 1–10 ratings,
+// a notes line stamping the source, and an estimated commute when possible.
+// Names that already exist are skipped, never overwritten.
+function importSeedApartments(items, sourceLabel) {
+  let added = 0, skipped = 0;
+  const work = primaryWork();
+  const stamp = sourceLabel + ' — added ' + new Date().toISOString().slice(0, 10);
+  (items || []).forEach(item => {
+    if (!item || typeof item !== 'object') { skipped++; return; }
+    const name = String(item.name || '').trim();
+    if (!name || apartments[name]) { skipped++; return; }
+    const lat = parseFloat(item.latitude);
+    const lng = parseFloat(item.longitude);
+    let commute_minutes = '', commute_estimated = false;
+    if (Number.isFinite(lat) && Number.isFinite(lng) && work) {
+      commute_minutes = estimateCommuteMinutes(lat, lng, work);
+      commute_estimated = true;
+    }
+    const plans = (Array.isArray(item.floor_plans) && item.floor_plans.length)
+      ? item.floor_plans.map(p => {
+          p = (p && typeof p === 'object') ? p : {};
+          return {
+            name: String(p.name || ''),
+            price: p.price ?? '',
+            sqft: p.sqft ?? '',
+            hoa: p.hoa ?? '',
+            property_tax: p.property_tax ?? '',
+          };
+        })
+      : [{ name: '', price: '', sqft: '', hoa: '', property_tax: '' }];
+    const ownNotes = String(item.notes || '').trim();
+    apartments[name] = {
+      address: String(item.address || ''),
+      website: String(item.website || ''),
+      year_built: item.year_built ?? '',
+      walk_score: item.walk_score ?? '',
+      latitude: item.latitude ?? '',
+      longitude: item.longitude ?? '',
+      commute_minutes,
+      commute_estimated,
+      google_review: item.google_review ?? '',
+      notes: ownNotes ? ownNotes + '\n' + stamp : stamp,
+      neighborhood_vibe: '',
+      condition_score: '',
+      appliances_score: '',
+      gut_feeling: '',
+      parking_spots_included: '',
+      parking_cost_extra: '',
+      parking_type: '',
+      washer_dryer: '',
+      dishwasher: '',
+      stove_type: '',
+      fridge: '',
+      closet_style: '',
+      floor_type: '',
+      ac_type: '',
+      floor_plans: plans,
+      created_at: new Date().toISOString(),
+    };
+    added++;
+  });
+  if (added || skipped) { save(); renderAll(); }
+  if (!added && !skipped) {
+    toast('Nothing importable found in those results.');
+  } else {
+    toast('Added ' + added + ' apartment' + (added === 1 ? '' : 's') +
+      (skipped ? ' (' + skipped + ' duplicates skipped)' : '') +
+      '. Add your 1–10 ratings to rank them properly.');
+  }
+  return { added, skipped };
+}
+
+// The prompt the user pastes into their own Muse (panel B).
+function buildSeedPrompt(anchor, o) {
+  let p = 'I am building a shortlist of rental apartments in my Housing Ranker app. Research REAL apartment properties for me.\n' +
+    'Anchor: my ' + anchor.name + ', at latitude ' + anchor.lat + ', longitude ' + anchor.lng +
+    '. Find up to ' + o.count + ' rental apartment properties within about ' + o.radius + ' miles of that point.';
+  if (o.maxRent) p += '\nMax rent: $' + Number(o.maxRent).toLocaleString('en-US') + ' per month or less.';
+  if (o.bedrooms) {
+    const beds = { '1': '1 bedroom', '2': '2 bedrooms', '3+': '3+ bedrooms' }[o.bedrooms] || o.bedrooms;
+    p += '\nBedrooms: ' + beds + '.';
+  }
+  if (o.mustHaves) p += '\nMust-haves: ' + o.mustHaves + '.';
+  p += '\nUse web search to verify each property actually exists and currently rents units. For rents, use the lowest listed asking rent you can find for each floor-plan type; if you cannot find a listed rent, use null — never invent numbers. Give coordinates as accurately as you can. Include walk_score, year_built and google_review only when you find them, otherwise null.' +
+    '\nReply with ONLY a ```json code block containing an array of objects with exactly these keys: name, address, website, latitude, longitude, walk_score, year_built, google_review, notes, floor_plans. notes is one short line naming your source (e.g. the listing site). floor_plans is an array of {name, price, sqft} — name like "1 bed / 1 bath", price the monthly rent (number or null), sqft a number or null. No text outside the code block.';
+  return p;
+}
+
+function openSeedModal() {
+  const body = document.createElement('div');
+  const anchor = primaryWork();
+  if (!anchor) {
+    body.innerHTML = '<p class="hint">Set a location with coordinates first — Settings → Your locations.</p>';
+    openModal('Seed apartments', body, true);
+    return;
+  }
+
+  const anchorOptions = settings.work_addresses
+    .map((w, i) => ({ w, i }))
+    .filter(x => hasCoords(x.w))
+    .map(x => '<option value="' + x.i + '"' + (x.w === anchor ? ' selected' : '') + '>' + esc(x.w.name) + '</option>')
+    .join('');
+
+  body.innerHTML =
+    '<div class="radio-cards" id="seed-modes">' +
+    '<label class="radio-card"><input type="radio" name="seed-mode" value="ai">' +
+    '<span class="rn">Free AI chat</span><span class="rw">Chat right here, no account needed. Fast, but details may be invented — verify before trusting.</span></label>' +
+    '<label class="radio-card"><input type="radio" name="seed-mode" value="claude" checked>' +
+    '<span class="rn">Use my Muse</span><span class="rw">Your Muse researches real listings on the web. Most accurate.</span></label>' +
+    '</div>' +
+
+    '<div class="seed-panel" id="seed-panel-ai" hidden>' +
+    '<div class="seed-msgs" id="seed-msgs"></div>' +
+    '<div class="err" id="seed-ai-err"></div>' +
+    '<div class="chat-row"><input type="text" id="seed-input" placeholder="e.g. 2 bed under $2,800, in-unit laundry…">' +
+    '<button type="button" class="btn primary" id="seed-send">Send</button></div>' +
+    '</div>' +
+
+    '<div class="seed-panel" id="seed-panel-claude">' +
+    '<div class="fld-row">' +
+    '<label class="fld"><span>Anchor location</span><select id="seed-anchor">' + anchorOptions + '</select></label>' +
+    '<label class="fld"><span>Radius (miles)</span><input type="number" id="seed-radius" min="1" step="1" value="3"></label>' +
+    '<label class="fld"><span>How many</span><input type="number" id="seed-count" min="1" max="20" step="1" value="6"></label>' +
+    '</div>' +
+    '<div class="fld-row">' +
+    '<label class="fld"><span>Max rent $/mo (optional)</span><input type="number" id="seed-maxrent" min="0" step="50" placeholder="No limit"></label>' +
+    '<label class="fld"><span>Bedrooms</span><select id="seed-beds"><option value="">Any</option><option value="1">1</option><option value="2">2</option><option value="3+">3+</option></select></label>' +
+    '<label class="fld"><span>Must-haves (optional)</span><input type="text" id="seed-must" placeholder="e.g. in-unit laundry, parking"></label>' +
+    '</div>' +
+    '<label class="fld"><span>Your prompt — copy this into Muse</span>' +
+    '<textarea class="copy-box" id="seed-prompt" readonly></textarea></label>' +
+    '<div class="row-flex">' +
+    '<button type="button" class="btn" id="seed-copy">Copy prompt</button>' +
+    '<a class="btn primary" href="https://muse.ai" target="_blank" rel="noopener">Open my Muse</a>' +
+    '</div>' +
+    '<p class="hint">1. Copy the prompt. 2. Open your Muse and paste it. 3. Paste Muse\'s answer back below.</p>' +
+    '<label class="fld"><span>Paste Muse\'s answer here</span>' +
+    '<textarea id="seed-paste" placeholder="Paste the full answer, including the json code block…"></textarea></label>' +
+    '<div class="err" id="seed-paste-err"></div>' +
+    '<div class="row-flex"><button type="button" class="btn primary" id="seed-import">Import apartments</button></div>' +
+    '</div>';
+
+  openModal('Seed apartments', body, true);
+
+  /* ----- chooser ----- */
+  const panelAi = $('#seed-panel-ai', body);
+  const panelClaude = $('#seed-panel-claude', body);
+  const syncPanels = () => {
+    const mode = ($('input[name="seed-mode"]:checked', body) || {}).value || 'claude';
+    panelAi.hidden = mode !== 'ai';
+    panelClaude.hidden = mode !== 'claude';
+  };
+  $$('input[name="seed-mode"]', body).forEach(r => { r.onchange = syncPanels; });
+  syncPanels();
+
+  /* ----- panel A: free AI chat (Pollinations, keyless) ----- */
+  seedChat = [
+    { role: 'system', content:
+      'You help build a rental shortlist for Housing Ranker. The user\'s anchor location is "' + anchor.name +
+      '" at latitude ' + anchor.lat + ', longitude ' + anchor.lng +
+      '. Suggest real, well-known apartment complexes near that point matching the user\'s criteria. ' +
+      'End EVERY reply that suggests apartments with a single ```json code block containing an array of objects with keys: ' +
+      'name, address, website, latitude, longitude, walk_score, year_built, google_review, notes, floor_plans ' +
+      '(array of {name, price, sqft}). Use null for anything you do not know — never invent rents; use typical listed rents ' +
+      'only when you are fairly confident. price is monthly USD rent, sqft a number.' },
+    { role: 'assistant', content: 'Tell me what you\'re looking for — bedrooms, budget, must-haves — and I\'ll suggest apartments near ' + anchor.name + '.' },
+  ];
+  const msgsBox = $('#seed-msgs', body);
+  const appendMsg = (role, text) => {
+    const d = document.createElement('div');
+    d.className = 'seed-msg ' + role;
+    d.textContent = text;
+    msgsBox.appendChild(d);
+    msgsBox.scrollTop = msgsBox.scrollHeight;
+    return d;
+  };
+  appendMsg('assistant', seedChat[1].content);
+
+  const aiErr = $('#seed-ai-err', body);
+  const aiInput = $('#seed-input', body);
+  const aiSend = $('#seed-send', body);
+  const sendSeedChat = async () => {
+    const text = aiInput.value.trim();
+    if (!text || aiSend.disabled) return;
+    showErr(aiErr, '');
+    aiInput.value = '';
+    seedChat.push({ role: 'user', content: text });
+    appendMsg('user', text);
+    aiSend.disabled = true;
+    aiInput.disabled = true;
+    const thinking = appendMsg('assistant', 'Thinking…');
+    try {
+      const res = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: seedChat }),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const content = (data && data.choices && data.choices[0] && data.choices[0].message)
+        ? String(data.choices[0].message.content || '') : '';
+      if (!content) throw new Error('empty reply');
+      thinking.remove();
+      seedChat.push({ role: 'assistant', content });
+      appendMsg('assistant', content);
+      const items = (extractSeedJSON(content) || [])
+        .filter(it => it && typeof it === 'object' && String(it.name || '').trim());
+      if (items.length) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn small primary';
+        b.textContent = 'Add ' + items.length + ' apartment' + (items.length === 1 ? '' : 's') + ' from this reply';
+        b.onclick = () => {
+          const r = importSeedApartments(items, 'Seeded via free AI chat — UNVERIFIED, verify all details');
+          if (r.added > 0) closeModal();
+        };
+        msgsBox.appendChild(b);
+        msgsBox.scrollTop = msgsBox.scrollHeight;
+      }
+    } catch (e) {
+      thinking.remove();
+      seedChat.pop(); // drop the unanswered user turn so a retry stays clean
+      aiInput.value = text;
+      showErr(aiErr, 'The free AI is unavailable right now — try again, or use the Muse option.');
+    }
+    aiSend.disabled = false;
+    aiInput.disabled = false;
+    aiInput.focus();
+  };
+  aiSend.onclick = sendSeedChat;
+  aiInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); sendSeedChat(); }
+  });
+
+  /* ----- panel B: Muse loop ----- */
+  const promptBox = $('#seed-prompt', body);
+  const readCriteria = () => {
+    const idx = parseInt($('#seed-anchor', body).value, 10);
+    return {
+      anchor: settings.work_addresses[idx] || anchor,
+      radius: parseFloat($('#seed-radius', body).value) || 3,
+      count: Math.max(1, parseInt($('#seed-count', body).value, 10) || 6),
+      maxRent: $('#seed-maxrent', body).value.trim(),
+      bedrooms: $('#seed-beds', body).value,
+      mustHaves: $('#seed-must', body).value.trim(),
+    };
+  };
+  const regenPrompt = () => {
+    const c = readCriteria();
+    promptBox.value = buildSeedPrompt(c.anchor, c);
+  };
+  ['seed-anchor', 'seed-radius', 'seed-count', 'seed-maxrent', 'seed-beds', 'seed-must'].forEach(id => {
+    const el = $('#' + id, body);
+    el.addEventListener('input', regenPrompt);
+    el.addEventListener('change', regenPrompt);
+  });
+  regenPrompt();
+  $('#seed-copy', body).onclick = () => copyText(promptBox.value, 'Prompt copied — paste it into your Muse');
+  $('#seed-import', body).onclick = () => {
+    const errBox = $('#seed-paste-err', body);
+    const items = extractSeedJSON($('#seed-paste', body).value);
+    if (!items) {
+      showErr(errBox, 'No apartment data found in that paste — make sure you copied Muse\'s full answer including the code block.');
+      return;
+    }
+    showErr(errBox, '');
+    const r = importSeedApartments(items, 'Seeded via Muse');
+    if (r.added > 0) closeModal();
+  };
+}
+
 /* ============================== share / export / import ============================== */
 
 // Snapshot payload: apartments plus the settings a friend needs to make sense
@@ -1003,6 +1376,7 @@ function checkShareHash() {
         settings.active_preset_id = s.active_preset_id || s.weight_presets[0].id;
       }
       settings.onboarded = true; // a snapshot implies a configured app
+      normalizeSettings();
     }
     apartments = snap.apartments;
     save();
@@ -1046,6 +1420,7 @@ function importJSONFile(file) {
       settings.active_preset_id = s.active_preset_id || s.weight_presets[0].id;
     }
     settings.onboarded = true;
+    normalizeSettings();
     apartments = data.apartments;
     save(); renderAll();
     toast('Import complete');
@@ -1065,6 +1440,7 @@ function wireHeader() {
   $('#btn-export').onclick = exportJSON;
   $('#btn-import').onclick = () => $('#import-file').click();
   $('#btn-add-apt-2').onclick = () => openApartmentForm();
+  $('#btn-seed-apt').onclick = () => openSeedModal();
   $('#btn-manage-presets').onclick = () => setTab('settings');
   $('#preset-select').onchange = e => {
     settings.active_preset_id = e.target.value;
